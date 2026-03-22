@@ -9,3 +9,8 @@ dist/
 .DS_Store
 logs/
 *.log
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
