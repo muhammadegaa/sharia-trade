@@ -973,8 +973,8 @@ export default function Home() {
     </>
   );
 
-  const mkt = summary.market;
-  const lastRun = summary.last_run;
+  const mkt = summary.market ?? { lse_open: false, nyse_open: false, any_open: false, active_market: null };
+  const lastRun = summary.last_run ?? null;
   const TABS: { id: Tab; label: string }[] = [
     { id: "portfolio", label: "Portfolio" },
     { id: "activity", label: "Activity" },
