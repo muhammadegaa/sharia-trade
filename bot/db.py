@@ -66,13 +66,23 @@ def init_db():
         )
     """)
 
-    # Seed starting portfolio if empty
+    # Start with £0 — user must deposit via Add Funds
     row = c.execute("SELECT COUNT(*) FROM portfolio").fetchone()[0]
     if row == 0:
         c.execute(
             "INSERT INTO portfolio (cash, updated_at) VALUES (?, datetime('now'))",
-            (10000.0,)
+            (0.0,)
         )
+
+    # Deposits table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS deposits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount REAL NOT NULL,
+            note TEXT,
+            deposited_at TEXT NOT NULL
+        )
+    """)
 
     conn.commit()
     conn.close()
