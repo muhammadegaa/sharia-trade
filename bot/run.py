@@ -1,33 +1,21 @@
 """
 Main daily runner — OpenClaw calls this every morning.
-1. Screen halal universe (cached, refresh weekly)
-2. Generate signals for all halal stocks
-3. Execute buys/sells
-4. Take portfolio snapshot
-5. Print summary (OpenClaw formats and sends to Telegram)
+1. Seed halal universe (pre-screened, instant)
+2. Batch fetch prices for all halal stocks
+3. Generate signals
+4. Execute buys/sells
+5. Take portfolio snapshot
 """
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from db import init_db, get_conn
-from screen import screen_all, get_halal_universe
-from signal import get_signal, rank_buy_signals
+from screen import get_halal_universe, screen_all
+from strategy import get_signals_batch, rank_buy_signals
 from execute import get_portfolio, execute_buy, execute_sell, take_snapshot
-
-
-def should_refresh_screener() -> bool:
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT cached_at FROM screener_cache ORDER BY cached_at DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-    if not row:
-        return True
-    cached = datetime.fromisoformat(row["cached_at"])
-    return datetime.now() - cached > timedelta(days=7)
 
 
 def run():
@@ -36,53 +24,42 @@ def run():
     print(f"{'='*50}\n")
 
     init_db()
-
-    # 1. Refresh screener weekly
-    if should_refresh_screener():
-        print("Refreshing Sharia screener (weekly)...")
-        screen_all()
-    else:
-        print("Using cached screener (< 7 days old)\n")
+    screen_all()  # instant — seeds pre-screened halal universe
 
     halal = get_halal_universe()
     print(f"Halal universe: {len(halal)} stocks\n")
 
-    # 2. Generate signals
     portfolio = get_portfolio()
     held = set(portfolio["positions"].keys())
-    print(f"Current positions: {len(held)}/{10}")
-    print(f"Cash available:    £{portfolio['cash']:,.2f}\n")
+    print(f"Positions: {len(held)}/10   Cash: £{portfolio['cash']:,.2f}\n")
 
-    signals = []
-    print("Generating signals...")
-    for ticker in halal:
-        s = get_signal(ticker, held)
-        signals.append(s)
-        if s["action"] != "HOLD":
-            print(f"  {ticker:12} → {s['action']} @ {s['price']:.2f} — {s['reason']}")
+    # Batch fetch + generate signals (one network call for all tickers)
+    signals = get_signals_batch(halal, held)
 
-    # 3. Execute sells first
-    sells = [s for s in signals if s["action"] == "SELL"]
-    for s in sells:
+    buys_found = [s for s in signals if s["action"] == "BUY"]
+    sells_found = [s for s in signals if s["action"] == "SELL"]
+    print(f"Signals: {len(buys_found)} BUY, {len(sells_found)} SELL\n")
+
+    # Execute sells first
+    for s in sells_found:
         result = execute_sell(s["ticker"], s["price"], s["reason"])
         if result:
-            pnl_str = f"+£{result['pnl']:.2f}" if result["pnl"] >= 0 else f"-£{abs(result['pnl']):.2f}"
-            print(f"\n  SOLD  {result['ticker']} | {result['shares']:.4f} shares @ £{result['price']:.2f} | P&L: {pnl_str}")
+            pnl = result["pnl"]
+            sign = "+" if pnl >= 0 else "-"
+            print(f"  SELL  {result['ticker']:12} @ £{result['price']:.2f}  P&L: {sign}£{abs(pnl):.2f}")
 
-    # 4. Execute buys (top ranked by momentum, up to 10 positions)
+    # Execute top buys
     portfolio = get_portfolio()
     held = set(portfolio["positions"].keys())
-    buys = rank_buy_signals(signals)
-    slots_available = 10 - len(held)
+    slots = 10 - len(held)
 
-    for s in buys[:slots_available]:
+    for s in rank_buy_signals(signals)[:slots]:
         if s["ticker"] in held:
             continue
         result = execute_buy(s["ticker"], s["price"], s["reason"])
         if result:
-            print(f"\n  BOUGHT {result['ticker']} | {result['shares']:.4f} shares @ £{result['price']:.2f} | Cost: £{result['cost']:.2f}")
+            print(f"  BUY   {result['ticker']:12} @ £{result['price']:.2f}  Cost: £{result['cost']:.2f}")
 
-    # 5. Snapshot
     total = take_snapshot()
 
     print(f"\n{'='*50}")
