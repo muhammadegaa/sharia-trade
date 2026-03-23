@@ -145,10 +145,10 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 // ── Modals ────────────────────────────────────────────────────────────────────
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 px-4">
-      <div className="bg-[#111] border border-[#222] rounded-2xl w-full max-w-sm p-6">
+      <div className={`bg-[#111] border border-[#222] rounded-2xl w-full ${wide ? "max-w-md" : "max-w-sm"} p-6`}>
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-white font-semibold">{title}</h3>
           <button onClick={onClose} className="text-[#666] hover:text-white transition-colors">
@@ -253,23 +253,51 @@ function WithdrawModal({ cash, onClose, onSuccess }: { cash: number; onClose: ()
   );
 }
 
+// ── ManualTradeModal — stock picker ───────────────────────────────────────────
 function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
   type: "buy" | "sell"; ticker?: string; cash: number; onClose: () => void; onSuccess: () => void;
 }) {
   const [selectedTicker, setSelectedTicker] = useState(ticker || "");
+  const [selectedStock, setSelectedStock] = useState<HalalStock | null>(null);
   const [amount, setAmount] = useState("");
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [halalStocks] = useState(Object.entries(
-    typeof window !== "undefined" ? {} : {}
-  ));
+  const [halalStocks, setHalalStocks] = useState<HalalStock[]>([]);
+  const [stockSearch, setStockSearch] = useState("");
+  const [fetchingPrice, setFetchingPrice] = useState(false);
 
+  // Fetch halal universe on mount
   useEffect(() => {
-    if (!selectedTicker) return;
+    fetch(`${API}/api/screener`)
+      .then(r => r.json())
+      .then(d => setHalalStocks(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, []);
+
+  // Fetch live price whenever selected ticker changes
+  useEffect(() => {
+    if (!selectedTicker) { setLivePrice(null); return; }
+    setFetchingPrice(true);
     fetch(`${API}/api/price/${selectedTicker}`)
-      .then(r => r.json()).then(d => setLivePrice(d.price)).catch(() => setLivePrice(null));
+      .then(r => r.json())
+      .then(d => setLivePrice(d.price ?? null))
+      .catch(() => setLivePrice(null))
+      .finally(() => setFetchingPrice(false));
   }, [selectedTicker]);
+
+  const filteredStocks = halalStocks.filter(s =>
+    !stockSearch ||
+    s.ticker.toLowerCase().includes(stockSearch.toLowerCase()) ||
+    s.name?.toLowerCase().includes(stockSearch.toLowerCase()) ||
+    s.sector?.toLowerCase().includes(stockSearch.toLowerCase())
+  );
+
+  function selectStock(stock: HalalStock) {
+    setSelectedTicker(stock.ticker);
+    setSelectedStock(stock);
+    setError("");
+  }
 
   async function submit() {
     setLoading(true);
@@ -288,46 +316,145 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
     finally { setLoading(false); }
   }
 
+  const estimatedShares = amount && livePrice && parseFloat(amount) > 0
+    ? parseFloat(amount) / livePrice
+    : null;
+
   return (
-    <Modal title={type === "buy" ? "Manual Buy" : "Manual Sell"} onClose={onClose}>
+    <Modal title={type === "buy" ? "Manual Buy" : "Manual Sell"} onClose={onClose} wide>
+      {/* Stock picker — only shown when no ticker is pre-selected */}
       {!ticker && (
-        <div className="mb-4">
-          <label className="text-[#555] text-xs uppercase tracking-wider mb-2 block">Stock</label>
-          <input
-            type="text" value={selectedTicker}
-            onChange={e => setSelectedTicker(e.target.value.toUpperCase())}
-            placeholder="e.g. AAPL, MSFT, BP.L"
-            className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 text-white text-sm placeholder-[#333] focus:outline-none focus:border-emerald-500 transition-colors"
-          />
-          <p className="text-[#444] text-xs mt-1">Halal universe only — AAOIFI screened</p>
+        <div className="mb-5">
+          <label className="text-[#555] text-xs uppercase tracking-wider mb-2 block">Select stock</label>
+          {/* Search */}
+          <div className="relative mb-2">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#555]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={stockSearch}
+              onChange={e => setStockSearch(e.target.value)}
+              placeholder="Search ticker, name or sector..."
+              className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-9 pr-4 py-2.5 text-white text-sm placeholder-[#444] focus:outline-none focus:border-emerald-500/50 transition-colors"
+              autoFocus
+            />
+          </div>
+
+          {/* Scrollable stock list */}
+          <div className="rounded-xl border border-[#2a2a2a] overflow-hidden" style={{ maxHeight: 300, overflowY: "scroll" }}>
+            {filteredStocks.length === 0 ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-[#444] text-sm">No stocks match "{stockSearch}"</p>
+              </div>
+            ) : filteredStocks.map(stock => {
+              const isSelected = selectedTicker === stock.ticker;
+              return (
+                <button
+                  key={stock.ticker}
+                  onClick={() => selectStock(stock)}
+                  className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors border-b border-[#1a1a1a] last:border-0 ${
+                    isSelected
+                      ? "bg-emerald-500/10 border-l-2 border-l-emerald-500"
+                      : "bg-[#0f0f0f] hover:bg-[#161616]"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`font-bold text-sm ${isSelected ? "text-emerald-400" : "text-white"}`}>
+                        {stock.ticker}
+                      </span>
+                      {stock.sector && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] font-medium truncate max-w-[80px]">
+                          {stock.sector}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[#555] text-xs mt-0.5 truncate">{stock.name}</p>
+                  </div>
+                  {isSelected && (
+                    <svg className="w-4 h-4 text-emerald-400 flex-shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
-      {livePrice && (
-        <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 mb-4">
-          <span className="text-[#555] text-xs">Current price</span>
-          <span className="text-white font-semibold ml-3">£{fmt(livePrice, 4)}</span>
+
+      {/* Selected stock + live price */}
+      {selectedTicker && (
+        <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 mb-4 flex items-center justify-between">
+          <div>
+            <span className="text-white font-bold">{selectedTicker}</span>
+            {selectedStock && <span className="text-[#555] text-xs ml-2">{selectedStock.name}</span>}
+          </div>
+          <div className="text-right">
+            {fetchingPrice ? (
+              <span className="text-[#555] text-xs">Fetching price...</span>
+            ) : livePrice ? (
+              <span className="text-white font-semibold">£{fmt(livePrice, 4)}</span>
+            ) : (
+              <span className="text-[#444] text-xs">Price unavailable</span>
+            )}
+          </div>
         </div>
       )}
+
+      {/* Amount input for buy */}
       {type === "buy" && (
-        <div className="mb-4 relative">
-          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#666]">£</span>
-          <input type="number" value={amount} onChange={e => { setAmount(e.target.value); setError(""); }}
-            placeholder="Amount to invest" max={cash}
-            className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-8 pr-4 py-3 text-white text-lg font-semibold placeholder-[#333] focus:outline-none focus:border-emerald-500 transition-colors" />
-          {amount && livePrice && <p className="text-[#555] text-xs mt-1">≈ {fmt(parseFloat(amount) / livePrice, 4)} shares</p>}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-[#555] text-xs uppercase tracking-wider">Amount</label>
+            <span className="text-[#444] text-xs">Available: <span className="text-white font-medium">£{fmt(cash)}</span></span>
+          </div>
+          {/* Quick select */}
+          <div className="flex gap-2 mb-2">
+            {[10, 25, 50, 100].map(p => (
+              <button key={p} onClick={() => { setAmount(String(p)); setError(""); }}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  amount === String(p) ? "bg-emerald-500 text-black" : "bg-[#1a1a1a] text-[#777] hover:text-white border border-[#2a2a2a]"
+                }`}>£{p}</button>
+            ))}
+          </div>
+          <div className="relative">
+            <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#666]">£</span>
+            <input
+              type="number"
+              value={amount}
+              onChange={e => { setAmount(e.target.value); setError(""); }}
+              placeholder="0.00"
+              max={cash}
+              className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-8 pr-4 py-3 text-white text-lg font-semibold placeholder-[#333] focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+          </div>
+          {estimatedShares !== null && (
+            <p className="text-[#555] text-xs mt-1.5">
+              approx. <span className="text-[#888]">{fmt(estimatedShares, 4)} shares</span>
+            </p>
+          )}
         </div>
       )}
+
       {type === "sell" && (
-        <p className="text-[#666] text-sm mb-6">Sell entire position in <span className="text-white font-semibold">{ticker}</span> at market price.</p>
+        <p className="text-[#666] text-sm mb-6">
+          Sell entire position in <span className="text-white font-semibold">{ticker}</span> at market price.
+        </p>
       )}
+
       <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl px-4 py-3 mb-6">
         <p className="text-emerald-400 text-xs">☾ Sharia compliant — verified against AAOIFI criteria</p>
       </div>
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
-      <button onClick={submit} disabled={loading || !selectedTicker}
+      <button
+        onClick={submit}
+        disabled={loading || !selectedTicker || (type === "buy" && (!amount || parseFloat(amount) <= 0))}
         className={`w-full py-3 rounded-xl font-semibold text-sm transition-colors disabled:opacity-50 ${
           type === "buy" ? "bg-emerald-500 hover:bg-emerald-400 text-black" : "bg-red-500 hover:bg-red-400 text-white"
-        }`}>
+        }`}
+      >
         {loading ? "Executing..." : type === "buy" ? "Confirm Buy" : "Confirm Sell"}
       </button>
     </Modal>
@@ -395,6 +522,53 @@ function EmptyState({ onDeposit }: { onDeposit: () => void }) {
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 type Tab = "portfolio" | "activity" | "pnl" | "sharia";
+
+// ── Position Card ─────────────────────────────────────────────────────────────
+function PositionCard({ position, onSell }: { position: Position; onSell: () => void }) {
+  const isUp = position.pnl >= 0;
+  return (
+    <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-5">
+      <div className="flex items-start justify-between mb-3">
+        {/* Left: ticker + meta */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-white text-xl font-bold">{position.ticker}</span>
+          </div>
+          <p className="text-[#555] text-xs truncate">{position.name}</p>
+          {position.sector && (
+            <span className="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] font-medium">
+              {position.sector}
+            </span>
+          )}
+        </div>
+
+        {/* Right: value + P&L */}
+        <div className="text-right flex-shrink-0 ml-4">
+          <p className="text-white text-lg font-bold">£{fmt(position.market_value)}</p>
+          <p className={`text-sm font-semibold ${isUp ? "text-emerald-400" : "text-red-400"}`}>
+            {gbp(position.pnl)}
+          </p>
+          <p className={`text-xs ${isUp ? "text-emerald-400/70" : "text-red-400/70"}`}>
+            {pct(position.pnl_pct)}
+          </p>
+        </div>
+      </div>
+
+      {/* Bottom row: avg price · shares + sell button */}
+      <div className="flex items-center justify-between pt-3 border-t border-[#1a1a1a]">
+        <p className="text-[#444] text-xs">
+          Avg £{fmt(position.avg_price, 4)} · {fmt(position.shares, 4)} shares
+        </p>
+        <button
+          onClick={onSell}
+          className="px-3 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium transition-colors border border-red-500/20"
+        >
+          Sell
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // ── PORTFOLIO TAB ─────────────────────────────────────────────────────────────
 function PortfolioTab({ summary, snapshots, trades, onSell, onReload }: {
@@ -472,51 +646,22 @@ function PortfolioTab({ summary, snapshots, trades, onSell, onReload }: {
           ))}
         </div>
 
+        {/* Positions — card layout */}
         {subTab === "positions" && (
           summary.positions.length === 0 ? (
             <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-8 text-center">
               <p className="text-[#333] text-sm">No open positions — bot buys on momentum signals</p>
             </div>
           ) : (
-            <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#1e1e1e]">
-                    {["Stock", "Shares", "Avg price", "Current", "Value", "P&L", ""].map(h => (
-                      <th key={h} className="text-left text-[#444] text-xs font-medium uppercase tracking-wider px-5 py-3">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.positions.map((p, i) => (
-                    <tr key={p.ticker} className={i < summary.positions.length - 1 ? "border-b border-[#1a1a1a]" : ""}>
-                      <td className="px-5 py-4">
-                        <div className="font-semibold text-white">{p.ticker}</div>
-                        <div className="text-[#555] text-xs">{p.name} · {p.sector}</div>
-                      </td>
-                      <td className="px-5 py-4 text-[#888]">{fmt(p.shares, 4)}</td>
-                      <td className="px-5 py-4 text-[#888]">£{fmt(p.avg_price, 4)}</td>
-                      <td className="px-5 py-4 text-white">£{fmt(p.current_price, 4)}</td>
-                      <td className="px-5 py-4 text-white">£{fmt(p.market_value)}</td>
-                      <td className="px-5 py-4">
-                        <span className={p.pnl >= 0 ? "text-emerald-400" : "text-red-400"}>
-                          {gbp(p.pnl)} <span className="text-xs opacity-70">({pct(p.pnl_pct)})</span>
-                        </span>
-                      </td>
-                      <td className="px-5 py-4">
-                        <button onClick={() => onSell(p.ticker)}
-                          className="px-3 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium transition-colors border border-red-500/20">
-                          Sell
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {summary.positions.map(p => (
+                <PositionCard key={p.ticker} position={p} onSell={() => onSell(p.ticker)} />
+              ))}
             </div>
           )
         )}
 
+        {/* Trades — list with colored left border */}
         {subTab === "trades" && (
           trades.length === 0 ? (
             <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-8 text-center">
@@ -524,33 +669,32 @@ function PortfolioTab({ summary, snapshots, trades, onSell, onReload }: {
             </div>
           ) : (
             <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#1e1e1e]">
-                    {["Date", "Ticker", "Action", "Shares", "Price", "Value", "Reason"].map(h => (
-                      <th key={h} className="text-left text-[#444] text-xs font-medium uppercase tracking-wider px-5 py-3">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((t, i) => (
-                    <tr key={t.id} className={i < trades.length - 1 ? "border-b border-[#1a1a1a]" : ""}>
-                      <td className="px-5 py-3 text-[#555] text-xs whitespace-nowrap">{fmtDate(t.executed_at)}</td>
-                      <td className="px-5 py-3 text-white font-medium">{t.ticker}</td>
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <Badge text={t.action} color={t.action === "BUY" ? "green" : "red"} />
-                          {t.is_manual === 1 && <Badge text="manual" color="blue" />}
-                        </div>
-                      </td>
-                      <td className="px-5 py-3 text-[#888]">{fmt(t.shares, 4)}</td>
-                      <td className="px-5 py-3 text-[#888]">£{fmt(t.price, 4)}</td>
-                      <td className="px-5 py-3 text-white">£{fmt(t.value)}</td>
-                      <td className="px-5 py-3 text-[#555] text-xs max-w-xs truncate">{t.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {trades.map((t, i) => (
+                <div
+                  key={t.id}
+                  className={`flex items-center gap-4 px-5 py-3.5 border-l-2 ${
+                    t.action === "BUY" ? "border-l-emerald-500" : "border-l-red-500"
+                  } ${i < trades.length - 1 ? "border-b border-[#1a1a1a]" : ""}`}
+                >
+                  <div className="flex-shrink-0">
+                    <Badge text={t.action} color={t.action === "BUY" ? "green" : "red"} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-white text-sm font-semibold">{t.ticker}</span>
+                      {t.is_manual === 1 && <Badge text="manual" color="blue" />}
+                    </div>
+                    <p className="text-[#444] text-xs truncate mt-0.5">{t.reason}</p>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <p className="text-white text-sm font-medium">£{fmt(t.value)}</p>
+                    <p className="text-[#555] text-xs">{fmt(t.shares, 4)} sh @ £{fmt(t.price, 4)}</p>
+                  </div>
+                  <div className="text-right flex-shrink-0 hidden sm:block">
+                    <p className="text-[#444] text-xs whitespace-nowrap">{fmtDate(t.executed_at)}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           )
         )}
@@ -993,6 +1137,11 @@ export default function Home() {
     { id: "sharia", label: "Sharia" },
   ];
 
+  // Market badges: show per-market status
+  const marketBadges = [];
+  if (mkt.lse_open) marketBadges.push({ label: "LSE", color: "green" as const });
+  if (mkt.nyse_open) marketBadges.push({ label: "NYSE", color: "green" as const });
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white">
       {/* Header */}
@@ -1004,16 +1153,22 @@ export default function Home() {
             </div>
             <div>
               <h1 className="text-white font-semibold text-sm">Sharia Trader</h1>
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 {mkt.any_open ? (
-                  <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="text-emerald-400 text-xs">{mkt.active_market} open</span></>
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="text-emerald-400 text-xs">Market open</span>
+                    {marketBadges.map(b => (
+                      <span key={b.label} className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                        {b.label}
+                      </span>
+                    ))}
+                  </>
                 ) : (
-                  <><span className="w-1.5 h-1.5 rounded-full bg-[#333]" />
-                    <span className="text-[#444] text-xs">Markets closed</span></>
-                )}
-                {lastRun && (
-                  <span className="text-[#333] text-xs">· Last run: {fmtDate(lastRun.started_at)} ({lastRun.trades_executed} trades)</span>
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#333]" />
+                    <span className="text-[#444] text-xs">Markets closed</span>
+                  </>
                 )}
               </div>
             </div>
@@ -1044,6 +1199,21 @@ export default function Home() {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Bot health bar */}
+        <div className="max-w-5xl mx-auto mt-2 pt-2 border-t border-[#151515]">
+          {lastRun ? (
+            <p className="text-[#444] text-xs">
+              Bot watching halal stocks
+              <span className="text-[#555] mx-1">·</span>
+              Last run: <span className="text-[#666]">{fmtDate(lastRun.started_at)}</span>
+              <span className="text-[#555] mx-1">·</span>
+              <span className="text-[#555]">{lastRun.trades_executed} trade{lastRun.trades_executed !== 1 ? "s" : ""} executed</span>
+            </p>
+          ) : (
+            <p className="text-[#333] text-xs">Bot not yet deployed — no runs recorded</p>
+          )}
         </div>
       </header>
 
