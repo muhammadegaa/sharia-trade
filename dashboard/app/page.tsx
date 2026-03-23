@@ -569,9 +569,12 @@ function ActivityTab() {
 
   useEffect(() => {
     Promise.all([
-      fetch(`${API}/api/runs`).then(r => r.json()),
-      fetch(`${API}/api/activity`).then(r => r.json()),
-    ]).then(([r, a]) => { setRuns(r); setEvents(a); });
+      fetch(`${API}/api/runs`).then(r => r.json()).catch(() => []),
+      fetch(`${API}/api/activity`).then(r => r.json()).catch(() => []),
+    ]).then(([r, a]) => {
+      setRuns(Array.isArray(r) ? r : []);
+      setEvents(Array.isArray(a) ? a : []);
+    });
   }, []);
 
   async function expandRun(id: number) {
@@ -700,14 +703,20 @@ function PnlTab() {
   const [data, setData] = useState<any>(null);
 
   useEffect(() => {
-    fetch(`${API}/api/pnl`).then(r => r.json()).then(setData);
+    fetch(`${API}/api/pnl`).then(r => r.json()).then(d => {
+      if (d && typeof d === "object") setData(d);
+    }).catch(() => setData({}));
   }, []);
 
   if (!data) return <div className="flex items-center justify-center py-20"><div className="w-5 h-5 border-2 border-[#333] border-t-emerald-500 rounded-full animate-spin" /></div>;
 
-  const s: PnlSummary = data.summary;
-  const daily = data.daily || [];
-  const purification = data.purification || [];
+  const s: PnlSummary = data.summary ?? {
+    total_pnl: 0, total_realized: 0, total_unrealized: 0,
+    win_rate: 0, total_trades: 0, wins: 0, losses: 0,
+    best_trade: null, worst_trade: null,
+  };
+  const daily = Array.isArray(data.daily) ? data.daily : [];
+  const purification = Array.isArray(data.purification) ? data.purification : [];
 
   return (
     <div className="space-y-6">
@@ -761,7 +770,7 @@ function PnlTab() {
       {/* Realized trades */}
       <div>
         <h3 className="text-[#555] text-xs font-medium uppercase tracking-wider mb-4">Realized trades</h3>
-        {data.realized.length === 0 ? (
+        {(data.realized ?? []).length === 0 ? (
           <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-8 text-center">
             <p className="text-[#333] text-sm">No closed trades yet</p>
           </div>
@@ -776,7 +785,7 @@ function PnlTab() {
                 </tr>
               </thead>
               <tbody>
-                {data.realized.map((t: any, i: number) => (
+                {(data.realized ?? []).map((t: any, i: number) => (
                   <tr key={t.id} className={i < data.realized.length - 1 ? "border-b border-[#1a1a1a]" : ""}>
                     <td className="px-5 py-3 text-[#555] text-xs whitespace-nowrap">{fmtDate(t.executed_at)}</td>
                     <td className="px-5 py-3 text-white font-medium">{t.ticker}</td>
@@ -826,7 +835,9 @@ function ShariaTab() {
   const [filter, setFilter] = useState("");
 
   useEffect(() => {
-    fetch(`${API}/api/screener`).then(r => r.json()).then(setStocks);
+    fetch(`${API}/api/screener`).then(r => r.json()).then(d => {
+      setStocks(Array.isArray(d) ? d : []);
+    }).catch(() => {});
   }, []);
 
   const filtered = stocks.filter(s =>
