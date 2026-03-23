@@ -1,22 +1,23 @@
 """
-Signal generator — 20-day momentum strategy using yfinance batch download.
-BUY  if price > 20-day SMA and not already held
-SELL if price < entry_price * 0.92 (8% stop loss) or price < SMA20 * 0.95
+Signal generator — 20-day SMA momentum strategy with full decision logging.
+Returns rich decision objects for every ticker considered.
 """
 import yfinance as yf
 import warnings
 warnings.filterwarnings("ignore")
 
 from db import get_conn
+from screen import HALAL_UNIVERSE
 
 
 def get_signals_batch(tickers: list, current_positions: set) -> list:
-    """Fetch all prices in one batch call — much faster than per-ticker."""
+    """Batch download prices, generate a decision for every ticker."""
     if not tickers:
         return []
 
-    print(f"Fetching price data for {len(tickers)} tickers...")
+    print(f"  Fetching price data for {len(tickers)} tickers...")
     try:
+        import yfinance as yf
         raw = yf.download(tickers, period="3mo", auto_adjust=True,
                           progress=False, threads=True)
         close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw
@@ -30,50 +31,76 @@ def get_signals_batch(tickers: list, current_positions: set) -> list:
     }
     conn.close()
 
-    signals = []
+    decisions = []
     for ticker in tickers:
+        meta = HALAL_UNIVERSE.get(ticker, {})
+        base = {
+            "ticker": ticker,
+            "name": meta.get("name", ticker),
+            "sector": meta.get("sector", "Unknown"),
+            "sharia_status": "HALAL",
+            "price": None,
+            "sma20": None,
+            "momentum_pct": None,
+        }
+
         try:
             col = close[ticker] if ticker in close.columns else None
             if col is None:
+                decisions.append({**base, "action": "SKIP", "reason": "No price data available", "is_executed": False})
                 continue
+
             series = col.dropna()
             if len(series) < 20:
+                decisions.append({**base, "action": "SKIP", "reason": f"Insufficient data ({len(series)} days)", "is_executed": False})
                 continue
 
             price = float(series.iloc[-1])
             sma20 = float(series.tail(20).mean())
             prev20 = float(series.iloc[-20])
-            momentum = (price - prev20) / prev20
+            momentum_pct = round((price - prev20) / prev20 * 100, 2)
+
+            base.update({"price": round(price, 4), "sma20": round(sma20, 4), "momentum_pct": momentum_pct})
 
             if ticker in current_positions and ticker in positions_db:
                 avg_price = float(positions_db[ticker]["avg_price"])
-                if price < avg_price * 0.92:
-                    signals.append({"ticker": ticker, "action": "SELL", "price": price,
-                                    "reason": f"Stop loss ({price:.2f} < {avg_price*0.92:.2f})"})
+                stop_price = round(avg_price * 0.92, 4)
+                sma_floor = round(sma20 * 0.95, 4)
+
+                if price < stop_price:
+                    decisions.append({**base, "action": "SELL",
+                        "reason": f"Stop loss hit: price £{price:.2f} < stop £{stop_price:.2f} (8% below entry £{avg_price:.2f})",
+                        "is_executed": False})
                     continue
-                if price < sma20 * 0.95:
-                    signals.append({"ticker": ticker, "action": "SELL", "price": price,
-                                    "reason": f"Below SMA20 ({price:.2f} < {sma20*0.95:.2f})"})
+
+                if price < sma_floor:
+                    decisions.append({**base, "action": "SELL",
+                        "reason": f"Trend broken: price £{price:.2f} < 95% of SMA20 £{sma_floor:.2f}",
+                        "is_executed": False})
                     continue
-                signals.append({"ticker": ticker, "action": "HOLD", "price": price,
-                                 "reason": f"Holding — {price:.2f} vs SMA20 {sma20:.2f}"})
+
+                pct_above = round((price / avg_price - 1) * 100, 2)
+                decisions.append({**base, "action": "HOLD",
+                    "reason": f"Holding: {pct_above:+.2f}% vs entry, price £{price:.2f} vs SMA20 £{sma20:.2f}",
+                    "is_executed": False})
                 continue
 
             if price > sma20 * 1.01:
-                signals.append({"ticker": ticker, "action": "BUY", "price": price,
-                                 "reason": f"Above SMA20, momentum {momentum:.1%}",
-                                 "momentum": momentum})
+                decisions.append({**base, "action": "BUY",
+                    "reason": f"Momentum signal: price £{price:.2f} is {((price/sma20)-1)*100:.1f}% above SMA20 £{sma20:.2f}, 20-day momentum {momentum_pct:+.1f}%",
+                    "is_executed": False})
             else:
-                signals.append({"ticker": ticker, "action": "HOLD", "price": price,
-                                 "reason": "Below SMA20 — no entry"})
+                gap = round((sma20 - price) / sma20 * 100, 1)
+                decisions.append({**base, "action": "HOLD",
+                    "reason": f"No signal: price £{price:.2f} is {gap:.1f}% below SMA20 £{sma20:.2f}",
+                    "is_executed": False})
 
         except Exception as e:
-            signals.append({"ticker": ticker, "action": "HOLD", "price": None,
-                             "reason": f"Error: {e}"})
+            decisions.append({**base, "action": "SKIP", "reason": f"Error: {e}", "is_executed": False})
 
-    return signals
+    return decisions
 
 
-def rank_buy_signals(signals: list) -> list:
-    buys = [s for s in signals if s["action"] == "BUY"]
-    return sorted(buys, key=lambda x: x.get("momentum", 0), reverse=True)
+def rank_buy_signals(decisions: list) -> list:
+    buys = [d for d in decisions if d["action"] == "BUY"]
+    return sorted(buys, key=lambda x: x.get("momentum_pct") or 0, reverse=True)

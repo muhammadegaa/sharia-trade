@@ -1,7 +1,9 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "portfolio.db")
+# On Railway, use /data (persistent volume). Locally, use bot/ directory.
+_data_dir = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
+DB_PATH = os.environ.get("DB_PATH", os.path.join(_data_dir, "portfolio.db"))
 
 
 def get_conn():
@@ -40,6 +42,7 @@ def init_db():
             price REAL NOT NULL,
             value REAL NOT NULL,
             reason TEXT,
+            is_manual INTEGER NOT NULL DEFAULT 0,
             executed_at TEXT NOT NULL
         )
     """)
@@ -62,7 +65,74 @@ def init_db():
             is_halal INTEGER NOT NULL,
             reason TEXT,
             debt_ratio REAL,
+            haram_revenue_pct REAL,
+            pass_reason TEXT,
             cached_at TEXT NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS deposits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount REAL NOT NULL,
+            note TEXT,
+            deposited_at TEXT NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS withdrawals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amount REAL NOT NULL,
+            note TEXT,
+            withdrawn_at TEXT NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bot_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            stocks_screened INTEGER DEFAULT 0,
+            signals_buy INTEGER DEFAULT 0,
+            signals_sell INTEGER DEFAULT 0,
+            signals_hold INTEGER DEFAULT 0,
+            trades_executed INTEGER DEFAULT 0,
+            portfolio_before REAL,
+            portfolio_after REAL,
+            market TEXT,
+            notes TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            ticker TEXT NOT NULL,
+            name TEXT,
+            sector TEXT,
+            action TEXT NOT NULL,
+            price REAL,
+            sma20 REAL,
+            momentum_pct REAL,
+            reason TEXT,
+            sharia_status TEXT,
+            is_executed INTEGER NOT NULL DEFAULT 0,
+            logged_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES bot_runs(id)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pnl_daily (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL UNIQUE,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            total_value REAL NOT NULL,
+            deposits_total REAL NOT NULL DEFAULT 0
         )
     """)
 
@@ -73,16 +143,6 @@ def init_db():
             "INSERT INTO portfolio (cash, updated_at) VALUES (?, datetime('now'))",
             (0.0,)
         )
-
-    # Deposits table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS deposits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            amount REAL NOT NULL,
-            note TEXT,
-            deposited_at TEXT NOT NULL
-        )
-    """)
 
     conn.commit()
     conn.close()
