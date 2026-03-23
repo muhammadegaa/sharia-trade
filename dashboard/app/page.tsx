@@ -101,9 +101,9 @@ type ActivityEvent = {
 };
 
 // ── Formatters ────────────────────────────────────────────────────────────────
-const fmt = (n: number, d = 2) =>
-  n.toLocaleString("en-GB", { minimumFractionDigits: d, maximumFractionDigits: d });
-const pct = (n: number) => `${n >= 0 ? "+" : ""}${fmt(n)}%`;
+const fmt = (n: number | undefined | null, d = 2) =>
+  (n ?? 0).toLocaleString("en-GB", { minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = (n: number | undefined | null) => `${(n ?? 0) >= 0 ? "+" : ""}${fmt(n)}%`;
 const gbp = (n: number) => n === 0 ? "£0.00" : `${n >= 0 ? "+" : "-"}£${fmt(Math.abs(n))}`;
 const fmtDate = (s: string) =>
   new Date(s).toLocaleDateString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
