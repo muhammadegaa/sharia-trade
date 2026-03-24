@@ -1,0 +1,2 @@
+FROM curlimages/curl:latest
+CMD ["sh", "-c", "curl -s -X POST $API_URL/api/cron/run -H 'X-Cron-Secret: $CRON_SECRET' && echo 'Cron triggered'"]
