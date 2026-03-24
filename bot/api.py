@@ -155,6 +155,157 @@ def screener():
     return result
 
 
+# ── Sharia live check ────────────────────────────────────────────────────────
+
+# Sectors that are clearly prohibited
+_HARAM_SECTORS = {
+    "Financial Services": "Interest-based banking/lending — riba (usury) is prohibited (Quran 2:275–276)",
+    "Banks": "Interest-based lending — riba prohibited in Islam",
+    "Insurance": "Conventional insurance involves riba and gharar (uncertainty) — Quran 2:219",
+    "Gambling & Casinos": "Directly prohibited — Quran 5:90 'intoxicants and gambling are abomination'",
+    "Alcoholic Beverages": "Alcohol prohibited — Quran 5:90; any revenue from it is haram",
+    "Tobacco": "Harmful substance — prohibited by scholarly consensus (mafsadah)",
+    "Defense & Aerospace": "Weapons manufacture — reviewed case by case; offensive arms are haram",
+    "Adult Entertainment": "Prohibited — promotes immorality (fahisha), Quran 24:19",
+}
+# Sectors needing closer review (may have mixed revenue)
+_BORDERLINE_SECTORS = {
+    "Consumer Defensive": "Often sells alcohol/tobacco alongside halal products — purification may apply",
+    "Consumer Cyclical": "May include entertainment or gaming revenue",
+    "Communication Services": "May carry advertising for haram products or produce haram content",
+    "Media": "May include haram content — detailed review needed",
+    "Healthcare": "Generally permissible; review for contraceptive/abortion product lines",
+}
+
+@app.get("/api/sharia/check")
+def sharia_check(ticker: str):
+    """Live AAOIFI screening for any ticker using yfinance balance sheet data."""
+    ticker = ticker.upper().strip()
+    # Check if already in pre-screened universe
+    if ticker in HALAL_UNIVERSE:
+        meta = HALAL_UNIVERSE[ticker]
+        return {
+            "ticker": ticker,
+            "name": meta["name"],
+            "sector": meta["sector"],
+            "source": "pre-screened",
+            "overall": "compliant" if meta.get("haram_revenue_pct", 0) < 5 else "non-compliant",
+            "criteria": [
+                {
+                    "name": "Business Activity",
+                    "result": "pass",
+                    "detail": meta["sharia_rules"][0] if meta.get("sharia_rules") else "Pre-screened halal sector",
+                    "proof": "AAOIFI Standard 21 — Business activity must not involve prohibited goods/services",
+                },
+                {
+                    "name": "Debt Ratio (Total Debt / Total Assets < 33%)",
+                    "result": "pass" if meta.get("debt_ratio", 0) < 0.33 else "fail",
+                    "detail": f"Debt ratio: {meta.get('debt_ratio', 0)*100:.0f}% — threshold 33%",
+                    "proof": "AAOIFI Standard 21, §3.2 — Excessive debt resembles riba-laden structure (Quran 2:275)",
+                    "values": {"debt_ratio": meta.get("debt_ratio")},
+                },
+                {
+                    "name": "Haram Revenue (Non-permissible revenue / Total revenue < 5%)",
+                    "result": "purify" if 0 < meta.get("haram_revenue_pct", 0) < 5 else "pass",
+                    "detail": f"{meta.get('haram_revenue_pct', 0)}% impermissible revenue — "
+                              + ("purification required" if meta.get("haram_revenue_pct", 0) > 0 else "clean"),
+                    "proof": "AAOIFI Standard 21, §4.1 — Up to 5% haram revenue is tolerated with purification; Prophet (ﷺ) said 'Every flesh nourished by haram is more deserving of fire' (Tirmidhi 614)",
+                    "values": {"haram_revenue_pct": meta.get("haram_revenue_pct", 0)},
+                },
+            ],
+            "pass_reason": meta.get("pass_reason"),
+            "purification_pct": meta.get("haram_revenue_pct", 0),
+        }
+    # Live check via yfinance
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info
+        if not info or not info.get("shortName"):
+            return {"ticker": ticker, "error": "Ticker not found"}
+        sector = info.get("sector", "") or info.get("industry", "") or ""
+        name = info.get("longName") or info.get("shortName", ticker)
+        # Business activity
+        haram_match = next(
+            ((k, v) for k, v in _HARAM_SECTORS.items() if k.lower() in sector.lower()),
+            None
+        )
+        borderline_match = next(
+            ((k, v) for k, v in _BORDERLINE_SECTORS.items() if k.lower() in sector.lower()),
+            None
+        )
+        if haram_match:
+            biz_result, biz_detail = "fail", f"Sector '{sector}' — {haram_match[1]}"
+        elif borderline_match:
+            biz_result, biz_detail = "review", f"Sector '{sector}' — {borderline_match[1]}"
+        else:
+            biz_result, biz_detail = "pass", f"Sector '{sector}' — no prohibited activity identified"
+        # Debt ratio
+        total_debt = info.get("totalDebt") or 0
+        total_assets = info.get("totalAssets") or 0
+        if total_assets > 0:
+            debt_ratio = total_debt / total_assets
+            debt_result = "pass" if debt_ratio < 0.33 else "fail"
+            debt_detail = f"Total Debt: {_fmt_billions(total_debt)} / Total Assets: {_fmt_billions(total_assets)} = {debt_ratio*100:.1f}% (threshold 33%)"
+        else:
+            debt_ratio = None
+            debt_result = "unknown"
+            debt_detail = "Balance sheet data unavailable from public filings"
+        # Haram revenue — best effort based on sector flags
+        haram_rev_pct = 0
+        if borderline_match:
+            haram_rev_pct = 2.0  # conservative estimate; real figure needs analyst data
+            rev_detail = f"Estimated ~2% mixed revenue (sector average) — actual requires annual report review. Purification recommended."
+            rev_result = "purify"
+        else:
+            rev_detail = "No significant haram revenue identified based on sector classification"
+            rev_result = "pass"
+        overall = "non-compliant" if biz_result == "fail" or debt_result == "fail" else \
+                  "review" if biz_result == "review" or debt_result == "unknown" else "compliant"
+        return {
+            "ticker": ticker,
+            "name": name,
+            "sector": sector,
+            "source": "live",
+            "overall": overall,
+            "criteria": [
+                {
+                    "name": "Business Activity",
+                    "result": biz_result,
+                    "detail": biz_detail,
+                    "proof": "AAOIFI Standard 21 — Business activity must not involve prohibited goods/services (Quran 5:90, 2:275)",
+                },
+                {
+                    "name": "Debt Ratio (Total Debt / Total Assets < 33%)",
+                    "result": debt_result,
+                    "detail": debt_detail,
+                    "proof": "AAOIFI Standard 21, §3.2 — Excessive leverage resembles riba (Quran 2:275). Threshold: debt/assets < 33%.",
+                    "values": {"total_debt": total_debt, "total_assets": total_assets, "debt_ratio": debt_ratio},
+                },
+                {
+                    "name": "Haram Revenue (Non-permissible / Total revenue < 5%)",
+                    "result": rev_result,
+                    "detail": rev_detail,
+                    "proof": "AAOIFI Standard 21, §4.1 — Tolerated up to 5% with purification. 'Every flesh nourished by haram is more deserving of fire.' (Tirmidhi 614)",
+                    "values": {"haram_revenue_pct": haram_rev_pct},
+                },
+            ],
+            "purification_pct": haram_rev_pct,
+            "market_cap": info.get("marketCap"),
+            "exchange": info.get("exchange"),
+        }
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}
+
+def _fmt_billions(v: float) -> str:
+    if not v:
+        return "N/A"
+    if abs(v) >= 1e12:
+        return f"${v/1e12:.2f}T"
+    if abs(v) >= 1e9:
+        return f"${v/1e9:.2f}B"
+    return f"${v/1e6:.1f}M"
+
+
 # ── Deposits ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/deposits")
@@ -223,21 +374,21 @@ class ManualBuyRequest(BaseModel):
 
 @app.post("/api/trade/buy")
 def manual_buy(req: ManualBuyRequest):
-    ticker = req.ticker.upper()
-    if ticker not in HALAL_UNIVERSE:
-        raise HTTPException(400, f"{ticker} is not in the halal universe. Only AAOIFI-screened stocks allowed.")
+    ticker = req.ticker.upper().strip()
+    if not ticker:
+        raise HTTPException(400, "Ticker required")
     if req.amount <= 0:
         raise HTTPException(400, "Amount must be positive")
 
     price = live_price(ticker, 0)
     if price <= 0:
-        raise HTTPException(503, f"Could not fetch price for {ticker}")
+        raise HTTPException(503, f"Could not fetch live price for {ticker} — check the ticker symbol")
 
     portfolio = get_portfolio()
     if req.amount > portfolio["cash"]:
         raise HTTPException(400, f"Insufficient cash. Available: £{portfolio['cash']:.4f}")
 
-    result = execute_buy(ticker, price, f"Manual buy via dashboard", size=req.amount, is_manual=True)
+    result = execute_buy(ticker, price, "Manual buy via dashboard", size=req.amount, is_manual=True)
     if not result:
         raise HTTPException(400, "Buy failed — max positions reached or insufficient cash")
 
@@ -442,13 +593,11 @@ def market():
 
 @app.get("/api/price/{ticker}")
 def price(ticker: str):
-    t = ticker.upper()
-    if t not in HALAL_UNIVERSE:
-        raise HTTPException(400, f"{t} not in halal universe")
+    t = ticker.upper().strip()
     p = live_price(t, 0)
     if p <= 0:
-        raise HTTPException(503, "Price unavailable")
-    meta = HALAL_UNIVERSE[t]
+        raise HTTPException(503, f"Price unavailable for {t}")
+    meta = HALAL_UNIVERSE.get(t, {})
     return {"ticker": t, "price": p, "name": meta.get("name"), "sector": meta.get("sector")}
 
 
