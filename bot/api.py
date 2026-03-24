@@ -18,6 +18,21 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 init_db()
 
+# ── Scheduler (runs bot daily at 6am UTC Mon-Fri) ────────────────────────────
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+def _scheduled_run():
+    try:
+        from run import run
+        run()
+    except Exception as e:
+        print(f"[scheduler] error: {e}")
+
+_scheduler = BackgroundScheduler(timezone="UTC")
+_scheduler.add_job(_scheduled_run, CronTrigger(day_of_week="mon-fri", hour=6, minute=0))
+_scheduler.start()
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
