@@ -1,0 +1,12 @@
+dashboard/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+.env
+.env.*
+*.db
+*.sqlite
+.next/
+node_modules/
