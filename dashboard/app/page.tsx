@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   ReferenceLine, BarChart, Bar, Cell,
 } from "recharts";
 import { useAuth } from "../lib/auth-context";
+import { savePortfolioState, saveTrade, saveFundsEvent } from "../lib/firestore-sync";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8787";
 
@@ -163,7 +164,7 @@ function Modal({ title, onClose, children, wide }: { title: string; onClose: () 
   );
 }
 
-function DepositModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+function DepositModal({ userId, onClose, onSuccess }: { userId?: string; onClose: () => void; onSuccess: () => void }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState(false);
@@ -179,6 +180,8 @@ function DepositModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         body: JSON.stringify({ amount: val, note }),
       });
       if (!res.ok) throw new Error((await res.json()).detail || "Failed");
+      const data = await res.json();
+      if (userId) saveFundsEvent(userId, { type: "deposit", amount: val, note, new_cash: data.cash ?? val });
       onSuccess();
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
@@ -211,7 +214,7 @@ function DepositModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
   );
 }
 
-function WithdrawModal({ cash, onClose, onSuccess }: { cash: number; onClose: () => void; onSuccess: () => void }) {
+function WithdrawModal({ userId, cash, onClose, onSuccess }: { userId?: string; cash: number; onClose: () => void; onSuccess: () => void }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState(false);
@@ -228,6 +231,8 @@ function WithdrawModal({ cash, onClose, onSuccess }: { cash: number; onClose: ()
         body: JSON.stringify({ amount: val, note }),
       });
       if (!res.ok) throw new Error((await res.json()).detail || "Failed");
+      const data = await res.json();
+      if (userId) saveFundsEvent(userId, { type: "withdrawal", amount: val, note, new_cash: data.cash ?? (cash - val) });
       onSuccess();
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
@@ -1028,9 +1033,48 @@ function PnlTab() {
 }
 
 // ── SHARIA TAB ────────────────────────────────────────────────────────────────
-function ShariaTab() {
+type ShariaCheckResult = {
+  ticker: string; name: string; sector: string; source: string;
+  overall: "compliant" | "non-compliant" | "review" | string;
+  criteria: { name: string; result: string; detail: string; proof: string; values?: Record<string, any> }[];
+  pass_reason?: string; purification_pct?: number;
+  market_cap?: number; exchange?: string; error?: string;
+};
+
+const AAOIFI_CRITERIA = [
+  {
+    rule: "Business Activity",
+    detail: "No banks, insurance, alcohol, tobacco, weapons, pork, gambling, or adult content",
+    proof: "AAOIFI Standard 21 — Quran 5:90 ('intoxicants and gambling are abomination'); Quran 2:275 (riba prohibited)",
+    icon: "☾",
+  },
+  {
+    rule: "Debt Ratio < 33%",
+    detail: "Total debt / total assets must be less than 33% — excessive leverage resembles riba",
+    proof: "AAOIFI Standard 21, §3.2 — based on ruling that majority of assets must be tangible (Quran 2:275–279)",
+    icon: "⚖",
+  },
+  {
+    rule: "Haram Revenue < 5%",
+    detail: "Non-permissible revenue / total revenue must be less than 5% of total income",
+    proof: "AAOIFI Standard 21, §4.1 — Hadith: 'Every flesh nourished by haram is more deserving of fire' (Tirmidhi 614)",
+    icon: "%",
+  },
+  {
+    rule: "Purification",
+    detail: "If haram revenue is 0–5%, donate that same % of profit to a charitable cause",
+    proof: "AAOIFI Standard 21, §4.2 — purification (tathir) cleanses any residual impermissible earnings",
+    icon: "♡",
+  },
+];
+
+function ShariaTab({ summary }: { summary: Summary | null }) {
   const [stocks, setStocks] = useState<HalalStock[]>([]);
   const [filter, setFilter] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [checkTicker, setCheckTicker] = useState("");
+  const [checkResult, setCheckResult] = useState<ShariaCheckResult | null>(null);
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/screener`).then(r => r.json()).then(d => {
@@ -1044,31 +1088,138 @@ function ShariaTab() {
     s.sector?.toLowerCase().includes(filter.toLowerCase())
   );
 
+  async function runCheck() {
+    if (!checkTicker.trim()) return;
+    setChecking(true); setCheckResult(null);
+    try {
+      const res = await fetch(`${API}/api/sharia/check?ticker=${encodeURIComponent(checkTicker.trim())}`);
+      setCheckResult(await res.json());
+    } catch { setCheckResult({ ticker: checkTicker, error: "Request failed", name: "", sector: "", source: "live", overall: "review", criteria: [] }); }
+    finally { setChecking(false); }
+  }
+
+  // Purification summary from current holdings
+  const purificationItems: { ticker: string; name: string; pct: number; holdingValue: number; donateAmount: number }[] = [];
+  if (summary?.positions) {
+    for (const [ticker, pos] of Object.entries(summary.positions as Record<string, any>)) {
+      const meta = stocks.find(s => s.ticker === ticker);
+      const pct = meta?.haram_revenue_pct || 0;
+      if (pct > 0) {
+        const holdingValue = pos.current_value || 0;
+        purificationItems.push({
+          ticker, name: meta?.name || ticker, pct,
+          holdingValue, donateAmount: holdingValue * (pct / 100),
+        });
+      }
+    }
+  }
+
+  const resultColor = (r: string) =>
+    r === "pass" ? "text-emerald-400" : r === "fail" ? "text-red-400" : r === "purify" ? "text-yellow-400" : "text-[#888]";
+  const resultLabel = (r: string) =>
+    r === "pass" ? "Pass" : r === "fail" ? "Fail" : r === "purify" ? "Purify" : r === "unknown" ? "No data" : "Review";
+  const overallBadge = (o: string) =>
+    o === "compliant" ? <Badge text="Compliant" color="green" /> :
+    o === "non-compliant" ? <Badge text="Non-Compliant" color="red" /> :
+    <Badge text="Needs Review" color="yellow" />;
+
   return (
     <div className="space-y-6">
-      {/* AAOIFI rules */}
+      {/* AAOIFI criteria with scholarly references */}
       <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-5">
         <h3 className="text-white font-semibold mb-1">AAOIFI Screening Criteria</h3>
-        <p className="text-[#555] text-xs mb-4">Accounting and Auditing Organisation for Islamic Financial Institutions</p>
+        <p className="text-[#555] text-xs mb-4">Accounting and Auditing Organisation for Islamic Financial Institutions — Standard 21</p>
         <div className="grid grid-cols-2 gap-3">
-          {[
-            { rule: "Business activity", detail: "No banks, insurance, alcohol, tobacco, weapons, pork, gambling, adult content" },
-            { rule: "Debt ratio", detail: "Total debt / total assets must be less than 33%" },
-            { rule: "Haram income", detail: "Non-permissible revenue / total revenue must be less than 5%" },
-            { rule: "Purification", detail: "If 0–5% haram revenue, donate that % of profit to charity" },
-          ].map(r => (
+          {AAOIFI_CRITERIA.map(r => (
             <div key={r.rule} className="bg-[#0f0f0f] border border-[#1a1a1a] rounded-xl p-4">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-emerald-400 text-xs">☾</span>
+                <span className="text-emerald-400 text-xs">{r.icon}</span>
                 <span className="text-white text-xs font-semibold">{r.rule}</span>
               </div>
-              <p className="text-[#555] text-xs leading-relaxed">{r.detail}</p>
+              <p className="text-[#555] text-xs leading-relaxed mb-2">{r.detail}</p>
+              <p className="text-[#333] text-xs italic leading-relaxed border-t border-[#1a1a1a] pt-2">{r.proof}</p>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Stock filter */}
+      {/* Live screener — check any stock */}
+      <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl p-5">
+        <h3 className="text-white font-semibold mb-1">Screen Any Stock</h3>
+        <p className="text-[#555] text-xs mb-4">Enter any ticker for a live AAOIFI compliance check using public balance sheet data</p>
+        <div className="flex gap-3">
+          <input
+            value={checkTicker} onChange={e => setCheckTicker(e.target.value.toUpperCase())}
+            onKeyDown={e => e.key === "Enter" && runCheck()}
+            placeholder="e.g. TSLA, AMZN, HSBA.L"
+            className="flex-1 bg-[#0f0f0f] border border-[#2a2a2a] rounded-xl px-4 py-2.5 text-white text-sm placeholder-[#333] focus:outline-none focus:border-emerald-500 transition-colors"
+          />
+          <button onClick={runCheck} disabled={checking || !checkTicker.trim()}
+            className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-black text-sm font-semibold transition-colors">
+            {checking ? "Checking..." : "Check"}
+          </button>
+        </div>
+
+        {checkResult && !checkResult.error && (
+          <div className="mt-4 bg-[#0f0f0f] border border-[#1a1a1a] rounded-xl p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-white font-semibold">{checkResult.name}</span>
+                <span className="text-[#555] text-xs ml-2">{checkResult.ticker}</span>
+                {checkResult.sector && <span className="text-[#444] text-xs ml-2">· {checkResult.sector}</span>}
+              </div>
+              {overallBadge(checkResult.overall)}
+            </div>
+            <div className="space-y-3">
+              {checkResult.criteria.map(c => (
+                <div key={c.name} className="border border-[#1a1a1a] rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[#888] text-xs font-medium">{c.name}</span>
+                    <span className={`text-xs font-semibold ${resultColor(c.result)}`}>{resultLabel(c.result)}</span>
+                  </div>
+                  <p className="text-[#666] text-xs mb-1.5">{c.detail}</p>
+                  <p className="text-[#333] text-xs italic border-t border-[#1a1a1a] pt-2">{c.proof}</p>
+                </div>
+              ))}
+            </div>
+            {checkResult.source === "live" && (
+              <p className="text-[#333] text-xs">* Live data from public filings. Haram revenue estimate is based on sector classification — consult annual report for exact breakdown.</p>
+            )}
+          </div>
+        )}
+        {checkResult?.error && (
+          <p className="mt-3 text-red-400 text-xs">{checkResult.ticker}: {checkResult.error}</p>
+        )}
+      </div>
+
+      {/* Purification calculator */}
+      {purificationItems.length > 0 && (
+        <div className="bg-[#111] border border-yellow-500/20 rounded-2xl p-5">
+          <h3 className="text-white font-semibold mb-1">Purification Required</h3>
+          <p className="text-[#555] text-xs mb-4">You hold stocks with minor haram revenue. Donate the corresponding % of your holding value to charity (AAOIFI §4.2).</p>
+          <div className="space-y-3">
+            {purificationItems.map(p => (
+              <div key={p.ticker} className="flex items-center justify-between py-3 border-b border-[#1a1a1a] last:border-0">
+                <div>
+                  <span className="text-white text-sm font-semibold">{p.ticker}</span>
+                  <span className="text-[#555] text-xs ml-2">{p.name}</span>
+                  <span className="text-yellow-400 text-xs ml-2">{p.pct}% haram rev</span>
+                </div>
+                <div className="text-right">
+                  <p className="text-yellow-400 text-sm font-semibold">£{p.donateAmount.toFixed(2)}</p>
+                  <p className="text-[#444] text-xs">of £{p.holdingValue.toFixed(2)} holding</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 pt-3 border-t border-[#1a1a1a] flex justify-between">
+            <span className="text-[#555] text-xs">Total to donate</span>
+            <span className="text-yellow-400 text-sm font-bold">£{purificationItems.reduce((a, p) => a + p.donateAmount, 0).toFixed(2)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Screened stock list */}
       <div>
         <input
           type="text" value={filter} onChange={e => setFilter(e.target.value)}
@@ -1077,53 +1228,106 @@ function ShariaTab() {
         />
         <div className="bg-[#111] border border-[#1e1e1e] rounded-2xl overflow-hidden">
           <div className="px-5 py-3 border-b border-[#1a1a1a] flex items-center justify-between">
-            <span className="text-[#444] text-xs uppercase tracking-wider">{filtered.length} halal stocks</span>
-            <Badge text="AAOIFI Compliant" color="green" />
+            <span className="text-[#444] text-xs uppercase tracking-wider">{filtered.length} pre-screened halal stocks</span>
+            <Badge text="AAOIFI Standard 21" color="green" />
           </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-[#1e1e1e]">
-                {["Ticker", "Name", "Sector", "Debt ratio", "Haram rev", "Status"].map(h => (
-                  <th key={h} className="text-left text-[#444] text-xs font-medium uppercase tracking-wider px-5 py-3">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((s, i) => {
-                const needsPurif = (s.haram_revenue_pct || 0) > 0;
-                const borderlineDebt = (s.debt_ratio || 0) >= 0.30;
-                return (
-                  <tr key={s.ticker} className={i < filtered.length - 1 ? "border-b border-[#1a1a1a]" : ""}>
-                    <td className="px-5 py-4 text-white font-semibold">{s.ticker}</td>
-                    <td className="px-5 py-4 text-[#888]">{s.name}</td>
-                    <td className="px-5 py-4 text-[#888]">{s.sector}</td>
-                    <td className="px-5 py-4">
-                      <span className={borderlineDebt ? "text-yellow-400" : "text-[#888]"}>
-                        {s.debt_ratio != null ? `${(s.debt_ratio * 100).toFixed(0)}%` : "—"}
-                        {borderlineDebt && " ⚠"}
-                      </span>
-                    </td>
-                    <td className="px-5 py-4">
-                      <span className={needsPurif ? "text-yellow-400" : "text-[#888]"}>
-                        {s.haram_revenue_pct != null ? `${s.haram_revenue_pct}%` : "0%"}
-                        {needsPurif && " *"}
-                      </span>
-                    </td>
-                    <td className="px-5 py-4">
-                      {needsPurif
-                        ? <Badge text="Purify" color="yellow" />
-                        : borderlineDebt
-                        ? <Badge text="Monitor" color="yellow" />
-                        : <Badge text="Clean" color="green" />}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div>
+            {filtered.map((s, i) => {
+              const needsPurif = (s.haram_revenue_pct || 0) > 0;
+              const borderlineDebt = (s.debt_ratio || 0) >= 0.30;
+              const isExpanded = expanded === s.ticker;
+              return (
+                <div key={s.ticker} className={i < filtered.length - 1 ? "border-b border-[#1a1a1a]" : ""}>
+                  <button
+                    className="w-full flex items-center px-5 py-4 hover:bg-[#0f0f0f] transition-colors text-left"
+                    onClick={() => setExpanded(isExpanded ? null : s.ticker)}
+                  >
+                    <span className="w-20 text-white font-semibold text-sm">{s.ticker}</span>
+                    <span className="flex-1 text-[#888] text-sm">{s.name}</span>
+                    <span className="w-28 text-[#888] text-xs hidden sm:block">{s.sector}</span>
+                    <span className={`w-16 text-xs text-right ${borderlineDebt ? "text-yellow-400" : "text-[#888]"}`}>
+                      {s.debt_ratio != null ? `${(s.debt_ratio * 100).toFixed(0)}%` : "—"}{borderlineDebt ? " ⚠" : ""}
+                    </span>
+                    <span className={`w-16 text-xs text-right ${needsPurif ? "text-yellow-400" : "text-[#888]"}`}>
+                      {s.haram_revenue_pct != null ? `${s.haram_revenue_pct}%` : "0%"}
+                    </span>
+                    <span className="w-20 flex justify-end">
+                      {needsPurif ? <Badge text="Purify" color="yellow" /> : borderlineDebt ? <Badge text="Monitor" color="yellow" /> : <Badge text="Clean" color="green" />}
+                    </span>
+                    <span className="ml-3 text-[#444] text-xs">{isExpanded ? "▲" : "▼"}</span>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="px-5 pb-5 bg-[#0a0a0a] border-t border-[#1a1a1a]">
+                      <div className="pt-4 space-y-3">
+                        {/* Criteria breakdown */}
+                        <div className="grid grid-cols-1 gap-2">
+                          <div className="flex items-start gap-3 p-3 bg-[#111] rounded-lg border border-[#1a1a1a]">
+                            <span className="text-emerald-400 text-sm mt-0.5">✓</span>
+                            <div>
+                              <p className="text-white text-xs font-semibold mb-0.5">Business Activity — Pass</p>
+                              <p className="text-[#555] text-xs">{s.sector} — no prohibited goods or services</p>
+                              <p className="text-[#333] text-xs italic mt-1">Ref: AAOIFI Std 21 · Quran 5:90, 2:275</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3 p-3 bg-[#111] rounded-lg border border-[#1a1a1a]">
+                            <span className={`text-sm mt-0.5 ${borderlineDebt ? "text-yellow-400" : "text-emerald-400"}`}>
+                              {borderlineDebt ? "⚠" : "✓"}
+                            </span>
+                            <div>
+                              <p className="text-white text-xs font-semibold mb-0.5">
+                                Debt Ratio — {borderlineDebt ? "Monitor" : "Pass"} ({s.debt_ratio != null ? `${(s.debt_ratio * 100).toFixed(0)}%` : "N/A"})
+                              </p>
+                              <p className="text-[#555] text-xs">
+                                Debt/assets = {s.debt_ratio != null ? `${(s.debt_ratio * 100).toFixed(0)}%` : "unknown"}
+                                {" "}— AAOIFI threshold is 33%.
+                                {borderlineDebt && " Approaching limit — review quarterly."}
+                              </p>
+                              <p className="text-[#333] text-xs italic mt-1">Ref: AAOIFI Std 21 §3.2 · Quran 2:275–279 (riba prohibition)</p>
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-3 p-3 bg-[#111] rounded-lg border border-[#1a1a1a]">
+                            <span className={`text-sm mt-0.5 ${needsPurif ? "text-yellow-400" : "text-emerald-400"}`}>
+                              {needsPurif ? "⚠" : "✓"}
+                            </span>
+                            <div>
+                              <p className="text-white text-xs font-semibold mb-0.5">
+                                Haram Revenue — {needsPurif ? `Purify (${s.haram_revenue_pct}%)` : "Pass (0%)"}
+                              </p>
+                              <p className="text-[#555] text-xs">
+                                {needsPurif
+                                  ? `~${s.haram_revenue_pct}% of revenue from impermissible sources (${s.sharia_rules?.find(r => r.includes("alcohol") || r.includes("tobacco")) || "mixed goods"}). Donate ${s.haram_revenue_pct}% of your profit from this holding to charity.`
+                                  : "No haram revenue identified."}
+                              </p>
+                              <p className="text-[#333] text-xs italic mt-1">Ref: AAOIFI Std 21 §4.1–4.2 · Tirmidhi 614</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Sharia rules summary */}
+                        {s.sharia_rules?.length > 0 && (
+                          <div className="p-3 bg-[#111] rounded-lg border border-[#1a1a1a]">
+                            <p className="text-[#444] text-xs uppercase tracking-wider mb-2">Screening Notes</p>
+                            <ul className="space-y-1">
+                              {s.sharia_rules.map((r, i) => (
+                                <li key={i} className="text-[#555] text-xs flex items-start gap-2">
+                                  <span className="text-emerald-600 mt-0.5">·</span>
+                                  {r}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
           {filtered.some(s => (s.haram_revenue_pct || 0) > 0) && (
             <div className="px-5 py-3 border-t border-[#1a1a1a]">
-              <p className="text-[#444] text-xs">* Purification required — donate that % of profit to charity per AAOIFI standard</p>
+              <p className="text-[#444] text-xs">Purification: donate the haram revenue % of your profit to charity — AAOIFI Standard 21, §4.2</p>
             </div>
           )}
         </div>
@@ -1142,6 +1346,7 @@ export default function Home() {
   const [modal, setModal] = useState<"deposit" | "withdraw" | "buy" | null>(null);
   const [sellTicker, setSellTicker] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const lastSyncedTradeId = useRef(0);
 
   const load = useCallback(async () => {
     try {
@@ -1151,9 +1356,29 @@ export default function Home() {
         fetch(`${API}/api/trades`).then(r => r.json()),
       ]);
       setSummary(s); setSnapshots(sn); setTrades(tr);
+      if (user?.uid && s) {
+        savePortfolioState(user.uid, {
+          total_value: s.total_value ?? 0,
+          cash: s.cash ?? 0,
+          positions_value: s.positions_value ?? 0,
+          position_count: s.position_count ?? 0,
+          total_return_pct: s.total_return_pct ?? 0,
+          positions: s.positions ?? {},
+        });
+        const newTrades = (tr as Trade[]).filter(t => t.id > lastSyncedTradeId.current);
+        for (const t of newTrades) {
+          saveTrade(user.uid, {
+            ticker: t.ticker, action: t.action, shares: t.shares,
+            price: t.price, value: t.value, reason: t.reason,
+            is_manual: !!t.is_manual, executed_at: t.executed_at,
+          });
+        }
+        if (newTrades.length > 0)
+          lastSyncedTradeId.current = Math.max(...newTrades.map(t => t.id));
+      }
     } catch { /* offline */ }
     finally { setLoading(false); }
-  }, []);
+  }, [user]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { const t = setInterval(load, 60_000); return () => clearInterval(t); }, [load]);
@@ -1178,7 +1403,7 @@ export default function Home() {
   if (!summary || summary.net_deposited === 0) return (
     <>
       <EmptyState onDeposit={() => setModal("deposit")} />
-      {modal === "deposit" && <DepositModal onClose={closeModal} onSuccess={onSuccess} />}
+      {modal === "deposit" && <DepositModal userId={user?.uid} onClose={closeModal} onSuccess={onSuccess} />}
     </>
   );
 
@@ -1297,12 +1522,12 @@ export default function Home() {
         )}
         {tab === "activity" && <ActivityTab />}
         {tab === "pnl" && <PnlTab />}
-        {tab === "sharia" && <ShariaTab />}
+        {tab === "sharia" && <ShariaTab summary={summary} />}
       </main>
 
       {/* Modals */}
-      {modal === "deposit" && <DepositModal onClose={closeModal} onSuccess={onSuccess} />}
-      {modal === "withdraw" && <WithdrawModal cash={summary.cash} onClose={closeModal} onSuccess={onSuccess} />}
+      {modal === "deposit" && <DepositModal userId={user?.uid} onClose={closeModal} onSuccess={onSuccess} />}
+      {modal === "withdraw" && <WithdrawModal userId={user?.uid} cash={summary.cash} onClose={closeModal} onSuccess={onSuccess} />}
       {modal === "buy" && <ManualTradeModal type="buy" cash={summary.cash} onClose={closeModal} onSuccess={onSuccess} />}
       {sellTicker && <SellConfirmModal ticker={sellTicker} onClose={closeModal} onSuccess={onSuccess} />}
     </div>
