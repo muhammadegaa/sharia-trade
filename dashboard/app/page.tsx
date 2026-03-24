@@ -266,6 +266,8 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
   const [halalStocks, setHalalStocks] = useState<HalalStock[]>([]);
   const [stockSearch, setStockSearch] = useState("");
   const [fetchingPrice, setFetchingPrice] = useState(false);
+  const [liveSuggestions, setLiveSuggestions] = useState<{ticker: string; name: string; exchange: string; type: string}[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Fetch halal universe on mount
   useEffect(() => {
@@ -286,6 +288,22 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
       .finally(() => setFetchingPrice(false));
   }, [selectedTicker]);
 
+  // Live search via Yahoo Finance (debounced 300ms)
+  useEffect(() => {
+    if (stockSearch.length < 2) { setLiveSuggestions([]); return; }
+    setIsSearching(true);
+    const t = setTimeout(() => {
+      fetch(`${API}/api/search?q=${encodeURIComponent(stockSearch)}`)
+        .then(r => r.json())
+        .then(d => setLiveSuggestions(Array.isArray(d) ? d : []))
+        .catch(() => setLiveSuggestions([]))
+        .finally(() => setIsSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [stockSearch]);
+
+  const halalTickers = new Set(halalStocks.map(s => s.ticker));
+
   const filteredStocks = halalStocks.filter(s =>
     !stockSearch ||
     s.ticker.toLowerCase().includes(stockSearch.toLowerCase()) ||
@@ -293,9 +311,16 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
     s.sector?.toLowerCase().includes(stockSearch.toLowerCase())
   );
 
-  function selectStock(stock: HalalStock) {
+  // When typing, prefer live suggestions; otherwise show halal universe
+  const showLive = stockSearch.length >= 2;
+
+  function selectStock(stock: HalalStock | {ticker: string; name: string; exchange?: string; type?: string}) {
     setSelectedTicker(stock.ticker);
-    setSelectedStock(stock);
+    // If it's in the halal universe, attach full metadata; otherwise just name
+    const halal = halalStocks.find(h => h.ticker === stock.ticker) ?? null;
+    setSelectedStock(halal);
+    setStockSearch("");
+    setLiveSuggestions([]);
     setError("");
   }
 
@@ -343,9 +368,44 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
 
           {/* Scrollable stock list */}
           <div className="rounded-xl border border-[#2a2a2a] overflow-hidden" style={{ maxHeight: 300, overflowY: "scroll" }}>
-            {filteredStocks.length === 0 ? (
+            {isSearching ? (
               <div className="flex items-center justify-center py-8">
-                <p className="text-[#444] text-sm">No stocks match "{stockSearch}"</p>
+                <p className="text-[#444] text-sm">Searching...</p>
+              </div>
+            ) : showLive ? (
+              liveSuggestions.length === 0 ? (
+                <div className="flex items-center justify-center py-8">
+                  <p className="text-[#444] text-sm">No results for "{stockSearch}"</p>
+                </div>
+              ) : liveSuggestions.map(s => {
+                const isSelected = selectedTicker === s.ticker;
+                const isHalal = halalTickers.has(s.ticker);
+                return (
+                  <button
+                    key={s.ticker}
+                    onClick={() => selectStock(s)}
+                    className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors border-b border-[#1a1a1a] last:border-0 ${
+                      isSelected ? "bg-emerald-500/10" : "bg-[#0f0f0f] hover:bg-[#161616]"
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-bold text-sm ${isSelected ? "text-emerald-400" : "text-white"}`}>{s.ticker}</span>
+                        {isHalal && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 font-medium">☾ Halal</span>
+                        )}
+                        {s.exchange && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] font-medium">{s.exchange}</span>
+                        )}
+                      </div>
+                      <p className="text-[#555] text-xs mt-0.5 truncate">{s.name}</p>
+                    </div>
+                  </button>
+                );
+              })
+            ) : filteredStocks.length === 0 ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-[#444] text-sm">No halal stocks match</p>
               </div>
             ) : filteredStocks.map(stock => {
               const isSelected = selectedTicker === stock.ticker;
@@ -354,20 +414,14 @@ function ManualTradeModal({ type, ticker, cash, onClose, onSuccess }: {
                   key={stock.ticker}
                   onClick={() => selectStock(stock)}
                   className={`w-full flex items-center justify-between px-4 py-3 text-left transition-colors border-b border-[#1a1a1a] last:border-0 ${
-                    isSelected
-                      ? "bg-emerald-500/10 border-l-2 border-l-emerald-500"
-                      : "bg-[#0f0f0f] hover:bg-[#161616]"
+                    isSelected ? "bg-emerald-500/10 border-l-2 border-l-emerald-500" : "bg-[#0f0f0f] hover:bg-[#161616]"
                   }`}
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className={`font-bold text-sm ${isSelected ? "text-emerald-400" : "text-white"}`}>
-                        {stock.ticker}
-                      </span>
+                      <span className={`font-bold text-sm ${isSelected ? "text-emerald-400" : "text-white"}`}>{stock.ticker}</span>
                       {stock.sector && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] font-medium truncate max-w-[80px]">
-                          {stock.sector}
-                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#1a1a1a] text-[#555] border border-[#2a2a2a] font-medium truncate max-w-[80px]">{stock.sector}</span>
                       )}
                     </div>
                     <p className="text-[#555] text-xs mt-0.5 truncate">{stock.name}</p>
@@ -1212,7 +1266,7 @@ export default function Home() {
               <span className="text-[#555]">{lastRun.trades_executed} trade{lastRun.trades_executed !== 1 ? "s" : ""} executed</span>
             </p>
           ) : (
-            <p className="text-[#333] text-xs">Bot not yet deployed — no runs recorded</p>
+            <p className="text-[#333] text-xs">Bot runs Mon–Fri at 6am UTC — no runs yet</p>
           )}
         </div>
       </header>
