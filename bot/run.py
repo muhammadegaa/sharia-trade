@@ -15,6 +15,22 @@ from execute import get_portfolio, execute_buy, execute_sell, take_snapshot
 from market_check import market_status
 
 
+def send_telegram(message: str):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "7772379116")
+    if not token:
+        return
+    try:
+        import httpx
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def get_position_size(cash: float, total_value: float) -> float:
     """Proportional sizing: 10% of portfolio, min £1, max £500."""
     size = total_value * 0.10
@@ -85,6 +101,11 @@ def run(force: bool = False):
     if not status["any_open"] and not force:
         print(f"  Markets closed. LSE: {'open' if status['lse_open'] else 'closed'}, NYSE: {'open' if status['nyse_open'] else 'closed'}")
         print("  Use run(force=True) to override.\n")
+        send_telegram(
+            f"🕌 <b>Sharia Trader — {datetime.now().strftime('%d %b %Y')}</b>\n\n"
+            f"🔴 Markets closed — no trades today.\n"
+            f"LSE: {'open' if status['lse_open'] else 'closed'} · NYSE: {'open' if status['nyse_open'] else 'closed'}"
+        )
         return
 
     active_market = status.get("active_market") or "Manual"
@@ -184,6 +205,17 @@ def run(force: bool = False):
     print(f"  Portfolio: £{total_after:,.4f}  ({sign}£{abs(change):.4f} this run)")
     print(f"  Run #{run_id} complete — {trades_executed} trade(s) executed")
     print(f"{'='*55}\n")
+
+    send_telegram(
+        f"🕌 <b>Sharia Trader — {datetime.now().strftime('%d %b %Y')}</b>\n\n"
+        f"📊 Market: {active_market}\n"
+        f"🔍 Screened: {len(halal)} halal stocks\n"
+        f"📈 Signals: {len(buys)} BUY · {len(sells)} SELL · {len(holds)} HOLD\n"
+        f"✅ Trades: {trades_executed} executed\n\n"
+        f"💼 Portfolio: <b>£{total_after:,.2f}</b>\n"
+        f"{'📈' if change >= 0 else '📉'} Run P&L: {sign}£{abs(change):.2f}\n\n"
+        f"<i>Run #{run_id} complete</i>"
+    )
 
 
 if __name__ == "__main__":
