@@ -485,6 +485,34 @@ def cron_run(x_cron_secret: str = None):
     }
 
 
+@app.get("/api/search")
+def search_stocks(q: str = ""):
+    """Live ticker search via Yahoo Finance — returns up to 8 equity results."""
+    if not q or len(q) < 2:
+        return []
+    try:
+        import httpx
+        resp = httpx.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": q, "lang": "en-US", "region": "US", "quotesCount": 8, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+        quotes = resp.json().get("quotes", [])
+        return [
+            {
+                "ticker": item.get("symbol", ""),
+                "name": item.get("longname") or item.get("shortname") or "",
+                "exchange": item.get("exchDisp", ""),
+                "type": item.get("typeDisp", ""),
+            }
+            for item in quotes
+            if item.get("symbol") and item.get("quoteType") in ("EQUITY", "ETF")
+        ]
+    except Exception:
+        return []
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "1.0.0"}
