@@ -15,8 +15,8 @@ const app: FirebaseApp = apiKey
           messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
           appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
         })
-      : getApps()[0])
-  : initializeApp({ apiKey: "placeholder" }, "placeholder");
+      : getApps()[0] as FirebaseApp)
+  : (getApps().find(a => a.name === "placeholder") ?? initializeApp({ apiKey: "placeholder" }, "placeholder"));
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
