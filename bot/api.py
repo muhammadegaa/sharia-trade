@@ -18,7 +18,9 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 init_db()
 
-# ── Scheduler (runs bot daily at 6am UTC Mon-Fri) ────────────────────────────
+# ── Scheduler ────────────────────────────────────────────────────────────────
+# LSE opens 08:00 London (GMT=08:00 UTC, BST=07:00 UTC) → run at 09:00 UTC (always after open)
+# NYSE opens 09:30 ET = 14:30 UTC → run at 14:30 UTC
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -30,7 +32,8 @@ def _scheduled_run():
         print(f"[scheduler] error: {e}")
 
 _scheduler = BackgroundScheduler(timezone="UTC")
-_scheduler.add_job(_scheduled_run, CronTrigger(day_of_week="mon-fri", hour=6, minute=0))
+_scheduler.add_job(_scheduled_run, CronTrigger(day_of_week="mon-fri", hour=9, minute=0))   # LSE session
+_scheduler.add_job(_scheduled_run, CronTrigger(day_of_week="mon-fri", hour=14, minute=30)) # NYSE open
 _scheduler.start()
 
 
