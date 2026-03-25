@@ -1101,13 +1101,13 @@ function ShariaTab({ summary }: { summary: Summary | null }) {
   // Purification summary from current holdings
   const purificationItems: { ticker: string; name: string; pct: number; holdingValue: number; donateAmount: number }[] = [];
   if (summary?.positions) {
-    for (const [ticker, pos] of Object.entries(summary.positions as Record<string, any>)) {
-      const meta = stocks.find(s => s.ticker === ticker);
+    for (const pos of summary.positions) {
+      const meta = stocks.find(s => s.ticker === pos.ticker);
       const pct = meta?.haram_revenue_pct || 0;
       if (pct > 0) {
-        const holdingValue = pos.current_value || 0;
+        const holdingValue = pos.market_value || 0;
         purificationItems.push({
-          ticker, name: meta?.name || ticker, pct,
+          ticker: pos.ticker, name: meta?.name || pos.ticker, pct,
           holdingValue, donateAmount: holdingValue * (pct / 100),
         });
       }
@@ -1363,7 +1363,7 @@ export default function Home() {
           positions_value: s.positions_value ?? 0,
           position_count: s.position_count ?? 0,
           total_return_pct: s.total_return_pct ?? 0,
-          positions: s.positions ?? {},
+          positions: Object.fromEntries((s.positions ?? []).map((p: Position) => [p.ticker, p])),
         });
         const newTrades = (tr as Trade[]).filter(t => t.id > lastSyncedTradeId.current);
         for (const t of newTrades) {
